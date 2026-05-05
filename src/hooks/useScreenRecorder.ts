@@ -57,6 +57,7 @@ type UseScreenRecorderReturn = {
 	setSystemAudioEnabled: (enabled: boolean) => void;
 	webcamEnabled: boolean;
 	setWebcamEnabled: (enabled: boolean) => Promise<boolean>;
+	webcamStream: MediaStream | null;
 };
 
 type RecorderHandle = {
@@ -97,11 +98,11 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const [systemAudioEnabled, setSystemAudioEnabled] = useState(false);
 	const [webcamEnabled, setWebcamEnabledState] = useState(false);
 	const screenRecorder = useRef<RecorderHandle | null>(null);
-	const webcamRecorder = useRef<RecorderHandle | null>(null);
 	const stream = useRef<MediaStream | null>(null);
 	const screenStream = useRef<MediaStream | null>(null);
 	const microphoneStream = useRef<MediaStream | null>(null);
 	const webcamStream = useRef<MediaStream | null>(null);
+	const [webcamStreamForUI, setWebcamStreamForUI] = useState<MediaStream | null>(null);
 	const mixingContext = useRef<AudioContext | null>(null);
 	const recordingId = useRef<number>(0);
 	const accumulatedDurationMs = useRef(0);
@@ -114,6 +115,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const [countdownActive, setCountdownActive] = useState(false);
 	const webcamReady = useRef(false);
 	const webcamAcquireId = useRef(0);
+	const webcamRecorder = useRef<RecorderHandle | null>(null);
 
 	const getRecordingDurationMs = useCallback(() => {
 		const segmentDuration =
@@ -153,7 +155,22 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		return Math.round(BITRATE_BASE * highFrameRateBoost);
 	};
 
+	const stopWebcamRecorder = useCallback(() => {
+		if (webcamRecorder.current) {
+			const rec = webcamRecorder.current.recorder;
+			if (rec.state === "recording" || rec.state === "paused") {
+				try {
+					rec.stop();
+				} catch {
+					// Recorder may already be stopping.
+				}
+			}
+			webcamRecorder.current = null;
+		}
+	}, []);
+
 	const teardownMedia = useCallback(() => {
+		stopWebcamRecorder();
 		if (stream.current) {
 			stream.current.getTracks().forEach((track) => track.stop());
 			stream.current = null;
@@ -172,7 +189,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			});
 			mixingContext.current = null;
 		}
-	}, []);
+	}, [stopWebcamRecorder]);
 
 	const setWebcamEnabled = useCallback(
 		async (enabled: boolean) => {
@@ -243,10 +260,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					};
 				});
 				webcamStream.current = stream;
-				webcamReady.current = true;
+				setWebcamStreamForUI(stream);
 			} catch (cameraError) {
 				if (!cancelled) {
-					console.warn("Failed to get webcam access:", cameraError);
+					console.error("Failed to get webcam access:", cameraError);
 					setWebcamEnabledState(false);
 					const isDeviceError =
 						cameraError instanceof DOMException &&
@@ -256,7 +273,15 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 							"OverconstrainedError",
 							"NotReadableError",
 						].includes(cameraError.name);
-					toast.error(t(isDeviceError ? "recording.cameraNotFound" : "recording.cameraBlocked"));
+					const isPermissionError =
+						cameraError instanceof DOMException &&
+						["NotAllowedError", "PermissionDeniedError"].includes(cameraError.name);
+					const errorMessage = isDeviceError
+						? t("recording.cameraNotFound")
+						: isPermissionError
+							? t("recording.cameraBlocked")
+							: `${t("recording.cameraBlocked")}: ${cameraError instanceof Error ? cameraError.message : String(cameraError)}`;
+					toast.error(errorMessage);
 					webcamReady.current = true;
 				}
 			}
@@ -274,16 +299,12 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				});
 				webcamStream.current = null;
 			}
+			setWebcamStreamForUI(null);
 		};
 	}, [webcamEnabled, webcamDeviceId, t]);
 
 	const finalizeRecording = useCallback(
-		(
-			activeScreenRecorder: RecorderHandle,
-			activeWebcamRecorder: RecorderHandle | null,
-			duration: number,
-			activeRecordingId: number,
-		) => {
+		(activeScreenRecorder: RecorderHandle, duration: number, activeRecordingId: number) => {
 			if (finalizingRecordingId.current === activeRecordingId) {
 				return;
 			}
@@ -292,8 +313,20 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			if (screenRecorder.current === activeScreenRecorder) {
 				screenRecorder.current = null;
 			}
-			if (activeWebcamRecorder && webcamRecorder.current === activeWebcamRecorder) {
-				webcamRecorder.current = null;
+
+			// Capture webcam recorder ref before teardown clears it,
+			// and stop it so its recordedBlobPromise resolves.
+			const activeWebcamRecorder = webcamRecorder.current;
+			webcamRecorder.current = null;
+			if (activeWebcamRecorder) {
+				const rec = activeWebcamRecorder.recorder;
+				if (rec.state === "recording" || rec.state === "paused") {
+					try {
+						rec.stop();
+					} catch {
+						// Recorder may already be stopping.
+					}
+				}
 			}
 
 			teardownMedia();
@@ -316,27 +349,27 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					}
 
 					const fixedScreenBlob = await fixWebmDuration(screenBlob, duration);
-					let fixedWebcamBlob: Blob | null = null;
+
+					// Wait for webcam blob if a webcam recorder was active
+					let webcamPayload: { videoData: ArrayBuffer; fileName: string } | undefined;
 					if (activeWebcamRecorder) {
-						const webcamBlob = await activeWebcamRecorder.recordedBlobPromise.catch(() => null);
-						if (webcamBlob && webcamBlob.size > 0) {
-							fixedWebcamBlob = await fixWebmDuration(webcamBlob, duration);
+						const webcamBlob = await activeWebcamRecorder.recordedBlobPromise;
+						if (webcamBlob.size > 0) {
+							const fixedWebcamBlob = await fixWebmDuration(webcamBlob, duration);
+							webcamPayload = {
+								videoData: await fixedWebcamBlob.arrayBuffer(),
+								fileName: `${RECORDING_FILE_PREFIX}${activeRecordingId}${WEBCAM_FILE_SUFFIX}${VIDEO_FILE_EXTENSION}`,
+							};
 						}
 					}
 
 					const screenFileName = `${RECORDING_FILE_PREFIX}${activeRecordingId}${VIDEO_FILE_EXTENSION}`;
-					const webcamFileName = `${RECORDING_FILE_PREFIX}${activeRecordingId}${WEBCAM_FILE_SUFFIX}${VIDEO_FILE_EXTENSION}`;
 					const result = await window.electronAPI.storeRecordedSession({
 						screen: {
 							videoData: await fixedScreenBlob.arrayBuffer(),
 							fileName: screenFileName,
 						},
-						webcam: fixedWebcamBlob
-							? {
-									videoData: await fixedWebcamBlob.arrayBuffer(),
-									fileName: webcamFileName,
-								}
-							: undefined,
+						webcam: webcamPayload,
 						createdAt: activeRecordingId,
 					});
 
@@ -373,16 +406,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			return;
 		}
 
-		const activeWebcamRecorder = webcamRecorder.current;
 		const duration = getRecordingDurationMs();
 		const activeRecordingId = recordingId.current;
 
-		finalizeRecording(
-			activeScreenRecorder,
-			activeWebcamRecorder ?? null,
-			duration,
-			activeRecordingId,
-		);
+		finalizeRecording(activeScreenRecorder, duration, activeRecordingId);
 
 		if (
 			activeScreenRecorder.recorder.state === "recording" ||
@@ -394,19 +421,25 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				// Recorder may already be stopping.
 			}
 		}
-		if (activeWebcamRecorder) {
-			if (
-				activeWebcamRecorder.recorder.state === "recording" ||
-				activeWebcamRecorder.recorder.state === "paused"
-			) {
-				try {
-					activeWebcamRecorder.recorder.stop();
-				} catch {
-					// Recorder may already be stopping.
-				}
-			}
-		}
 	});
+
+	const safeHideCountdownOverlay = useCallback(async (runId: number) => {
+		try {
+			await window.electronAPI.hideCountdownOverlay(runId);
+		} catch (error) {
+			console.warn("Failed to hide countdown overlay:", error);
+		}
+	}, []);
+
+	const safeShowCountdownOverlay = useCallback(async (value: number, runId: number) => {
+		try {
+			await window.electronAPI.showCountdownOverlay(value, runId);
+			return true;
+		} catch (error) {
+			console.warn("Failed to show countdown overlay:", error);
+			return false;
+		}
+	}, []);
 
 	useEffect(() => {
 		let cleanup: (() => void) | undefined;
@@ -436,31 +469,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					// Ignore recorder teardown errors during cleanup.
 				}
 			}
-			if (
-				webcamRecorder.current?.recorder.state === "recording" ||
-				webcamRecorder.current?.recorder.state === "paused"
-			) {
-				try {
-					webcamRecorder.current.recorder.stop();
-				} catch {
-					// Ignore recorder teardown errors during cleanup.
-				}
-			}
 			screenRecorder.current = null;
-			webcamRecorder.current = null;
 			teardownMedia();
 		};
-	}, [teardownMedia]);
-
-	const safeShowCountdownOverlay = async (value: number, runId: number) => {
-		try {
-			await window.electronAPI.showCountdownOverlay(value, runId);
-			return true;
-		} catch (error) {
-			console.warn("Failed to show countdown overlay:", error);
-			return false;
-		}
-	};
+	}, [teardownMedia, safeHideCountdownOverlay]);
 
 	const cancelCountdown = () => {
 		const activeRunId = countdownRunId.current;
@@ -469,21 +481,13 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		void safeHideCountdownOverlay(activeRunId);
 	};
 
-	const safeSetCountdownOverlayValue = async (value: number, runId: number) => {
+	const safeSetCountdownOverlayValue = useCallback(async (value: number, runId: number) => {
 		try {
 			await window.electronAPI.setCountdownOverlayValue(value, runId);
 		} catch (error) {
 			console.warn("Failed to update countdown overlay value:", error);
 		}
-	};
-
-	const safeHideCountdownOverlay = async (runId: number) => {
-		try {
-			await window.electronAPI.hideCountdownOverlay(runId);
-		} catch (error) {
-			console.warn("Failed to hide countdown overlay:", error);
-		}
-	};
+	}, []);
 
 	const isCountdownRunActive = (runId?: number) =>
 		runId === undefined || countdownRunId.current === runId;
@@ -680,7 +684,22 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			if (!videoTrack) {
 				throw new Error("Video track is not available.");
 			}
+
+			// Record the raw screen track (no webcam compositing).
+			// The webcam is recorded separately as an independent stream so
+			// the editor's Layout module has a dedicated webcam source.
 			stream.current.addTrack(videoTrack);
+
+			// Independently record the webcam stream if webcam is enabled
+			if (webcamEnabled && webcamStream.current) {
+				const webcamStreamForRecording = webcamStream.current;
+				const webcamMimeType = selectMimeType();
+				const webcamBitsPerSecond = computeBitrate(WEBCAM_TARGET_WIDTH, WEBCAM_TARGET_HEIGHT);
+				webcamRecorder.current = createRecorderHandle(webcamStreamForRecording, {
+					mimeType: webcamMimeType,
+					videoBitsPerSecond: webcamBitsPerSecond,
+				});
+			}
 
 			const systemAudioTrack = screenMediaStream.getAudioTracks()[0];
 			const micAudioTrack = microphoneStream.current?.getAudioTracks()[0];
@@ -759,13 +778,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				{ once: true },
 			);
 
-			if (webcamStream.current) {
-				webcamRecorder.current = createRecorderHandle(webcamStream.current, {
-					mimeType,
-					videoBitsPerSecond: Math.min(videoBitsPerSecond, BITRATE_BASE),
-				});
-			}
-
 			recordingId.current = Date.now();
 			accumulatedDurationMs.current = 0;
 			segmentStartedAt.current = Date.now();
@@ -776,7 +788,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			window.electronAPI?.setRecordingState(true, recordingId.current);
 
 			const activeScreenRecorder = screenRecorder.current;
-			const activeWebcamRecorder = webcamRecorder.current;
 			const activeRecordingId = recordingId.current;
 			if (activeScreenRecorder) {
 				activeScreenRecorder.recorder.addEventListener(
@@ -787,7 +798,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 						}
 						finalizeRecording(
 							activeScreenRecorder,
-							activeWebcamRecorder ?? null,
 							Math.max(0, getRecordingDurationMs()),
 							activeRecordingId,
 						);
@@ -809,7 +819,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			accumulatedDurationMs.current = 0;
 			segmentStartedAt.current = null;
 			screenRecorder.current = null;
-			webcamRecorder.current = null;
 			teardownMedia();
 		}
 	};
@@ -820,14 +829,9 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			return;
 		}
 
-		const activeWebcamRecorder = webcamRecorder.current?.recorder;
-
 		if (activeScreenRecorder.state === "paused") {
 			try {
 				activeScreenRecorder.resume();
-				if (activeWebcamRecorder?.state === "paused") {
-					activeWebcamRecorder.resume();
-				}
 				segmentStartedAt.current = Date.now();
 				setPaused(false);
 			} catch (error) {
@@ -845,9 +849,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			segmentStartedAt.current = null;
 			setElapsedSeconds(Math.floor(accumulatedDurationMs.current / 1000));
 			activeScreenRecorder.pause();
-			if (activeWebcamRecorder?.state === "recording") {
-				activeWebcamRecorder.pause();
-			}
 			setPaused(true);
 		} catch (error) {
 			console.error("Failed to pause recording:", error);
@@ -874,7 +875,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		const activeScreenRecorder = screenRecorder.current;
 		if (!activeScreenRecorder || activeScreenRecorder.recorder.state === "inactive") return;
 
-		const activeWebcamRecorder = webcamRecorder.current;
 		const activeRecordingId = recordingId.current;
 
 		restarting.current = true;
@@ -885,19 +885,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				activeScreenRecorder.recorder.addEventListener("stop", () => resolve(), { once: true });
 			}),
 		];
-
-		if (
-			activeWebcamRecorder?.recorder.state === "recording" ||
-			activeWebcamRecorder?.recorder.state === "paused"
-		) {
-			stopPromises.push(
-				new Promise<void>((resolve) => {
-					activeWebcamRecorder.recorder.addEventListener("stop", () => resolve(), {
-						once: true,
-					});
-				}),
-			);
-		}
 
 		stopRecording.current();
 		await Promise.all(stopPromises);
@@ -965,5 +952,6 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		setSystemAudioEnabled,
 		webcamEnabled,
 		setWebcamEnabled,
+		webcamStream: webcamStreamForUI,
 	};
 }

@@ -148,6 +148,10 @@ interface Window {
 		onCountdownOverlayValue: (callback: (value: number | null) => void) => () => void;
 		setMicrophoneExpanded: (expanded: boolean) => void;
 		setHasUnsavedChanges: (hasChanges: boolean) => void;
+		setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => void;
+		updateInteractiveRegions: (
+			regions: { left: number; top: number; width: number; height: number }[],
+		) => void;
 		onRequestSaveBeforeClose: (callback: () => Promise<boolean> | boolean) => () => void;
 		setLocale: (locale: string) => Promise<void>;
 	};

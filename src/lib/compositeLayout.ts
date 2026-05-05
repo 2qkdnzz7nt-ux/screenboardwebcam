@@ -166,7 +166,7 @@ export function computeCompositeLayout(params: {
 		screenSize,
 		webcamSize,
 		layoutPreset = "picture-in-picture",
-		webcamSizePreset = 25,
+		webcamSizePreset = 45,
 		webcamPosition,
 		webcamMaskShape = "rectangle",
 	} = params;

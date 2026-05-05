@@ -483,9 +483,26 @@ export function registerIpcHandlers(
 	getMainWindow: () => BrowserWindow | null,
 	getSourceSelectorWindow: () => BrowserWindow | null,
 	getCountdownOverlayWindow: () => BrowserWindow | null,
+	getHudOverlayWindow: () => BrowserWindow | null,
 	onRecordingStateChange?: (recording: boolean, sourceName: string) => void,
 	switchToHud?: () => void,
 ) {
+	// ─── Click-through control ──────────────────────────────────────────
+	// The renderer now controls setIgnoreMouseEvents directly via the
+	// "set-ignore-mouse-events" IPC channel, using DOM hit-testing on
+	// mousemove events. The old cursor-polling mechanism that required
+	// coordinate conversion has been removed because it breaks on Windows
+	// with non-100% display scaling (DPI mismatch between CSS pixels and
+	// screen pixels).
+	//
+	// The "update-interactive-regions" IPC is kept as a no-op for backward
+	// compatibility but is no longer used by the renderer.
+
+	ipcMain.on("update-interactive-regions", () => {
+		// No-op: click-through is now controlled by the renderer via
+		// set-ignore-mouse-events IPC using DOM hit-testing on mousemove.
+	});
+
 	const supportsWindowOpacity = process.platform !== "linux";
 	const countdownOverlayState = {
 		visible: false,
@@ -687,6 +704,11 @@ export function registerIpcHandlers(
 
 	ipcMain.handle("request-camera-access", async () => {
 		if (process.platform !== "darwin") {
+			// On Windows/Linux, camera permissions are handled by the OS at
+			// getUserMedia time.  We return a provisional "granted" so the
+			// renderer proceeds to call getUserMedia, which will trigger the
+			// native OS permission prompt if needed and surface any real
+			// denial as a DOMException.
 			return { success: true, granted: true, status: "granted" };
 		}
 
@@ -1307,6 +1329,16 @@ export function registerIpcHandlers(
 			return null;
 		}
 	});
+
+	ipcMain.on(
+		"set-ignore-mouse-events",
+		(event, ignore: boolean, options?: { forward: boolean }) => {
+			const win = BrowserWindow.fromWebContents(event.sender);
+			if (win && !win.isDestroyed()) {
+				win.setIgnoreMouseEvents(ignore, options);
+			}
+		},
+	);
 
 	ipcMain.handle("save-shortcuts", async (_, shortcuts: unknown) => {
 		try {

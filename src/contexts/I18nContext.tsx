@@ -45,7 +45,7 @@ function isSupportedLocale(value: string): value is Locale {
 	return getAvailableLocales().includes(value);
 }
 
-function getSupportedSystemLocale(): Locale | null {
+function _getSupportedSystemLocale(): Locale | null {
 	if (typeof navigator === "undefined") return null;
 	const availableLocales = getAvailableLocales();
 
@@ -88,7 +88,7 @@ function getInitialLocale(): Locale {
 export function I18nProvider({ children }: { children: ReactNode }) {
 	const [locale, setLocaleState] = useState<Locale>(getInitialLocale);
 	const [systemLocaleSuggestion, setSystemLocaleSuggestion] = useState<Locale | null>(null);
-	const hasRunSystemLocaleCheckRef = useRef(false);
+	const _hasRunSystemLocaleCheckRef = useRef(false);
 
 	const markPromptAsHandled = useCallback(() => {
 		try {
@@ -115,28 +115,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 	}, [locale]);
 
 	useEffect(() => {
-		if (hasRunSystemLocaleCheckRef.current) return;
-		hasRunSystemLocaleCheckRef.current = true;
-
-		let hasStoredLocale = false;
-		let hasHandledSystemPrompt = false;
-		try {
-			const stored = localStorage.getItem(LOCALE_STORAGE_KEY);
-			hasStoredLocale = Boolean(stored && isSupportedLocale(stored));
-			hasHandledSystemPrompt = localStorage.getItem(SYSTEM_LANGUAGE_PROMPT_SEEN_KEY) === "1";
-		} catch {
-			// localStorage may be unavailable
-		}
-
-		if (hasStoredLocale || hasHandledSystemPrompt) return;
-
-		const detectedSystemLocale = getSupportedSystemLocale();
-		if (!detectedSystemLocale || detectedSystemLocale === DEFAULT_LOCALE) {
-			markPromptAsHandled();
-			return;
-		}
-
-		setSystemLocaleSuggestion(detectedSystemLocale);
+		// Disable system language prompt — users can switch language from the toolbar
+		markPromptAsHandled();
 	}, [markPromptAsHandled]);
 
 	const acceptSystemLocaleSuggestion = useCallback(() => {

@@ -18,6 +18,10 @@ const ASSET_BASE_URL_ARG = `--asset-base-url=${pathToFileURL(`${ASSET_BASE_DIR}$
 
 let hudOverlayWindow: BrowserWindow | null = null;
 
+export function getHudOverlayWindow(): BrowserWindow | null {
+	return hudOverlayWindow;
+}
+
 ipcMain.on("hud-overlay-hide", () => {
 	if (hudOverlayWindow && !hudOverlayWindow.isDestroyed()) {
 		hudOverlayWindow.minimize();
@@ -33,21 +37,16 @@ export function createHudOverlayWindow(): BrowserWindow {
 	const primaryDisplay = screen.getPrimaryDisplay();
 	const { workArea } = primaryDisplay;
 
-	const windowWidth = 600;
-	const windowHeight = 160;
-
-	const x = Math.floor(workArea.x + (workArea.width - windowWidth) / 2);
-	const y = Math.floor(workArea.y + workArea.height - windowHeight - 5);
-
+	// Cover the full work area so that the webcam preview can be freely
+	// dragged anywhere on screen without being clipped by the window bounds.
+	// The window is transparent and only the HUD bar + webcam circle are visible.
 	const win = new BrowserWindow({
-		width: windowWidth,
-		height: windowHeight,
+		width: workArea.width,
+		height: workArea.height,
 		minWidth: 600,
-		maxWidth: 600,
 		minHeight: 160,
-		maxHeight: 160,
-		x: x,
-		y: y,
+		x: workArea.x,
+		y: workArea.y,
 		frame: false,
 		transparent: true,
 		resizable: false,
@@ -63,6 +62,22 @@ export function createHudOverlayWindow(): BrowserWindow {
 			backgroundThrottling: false,
 		},
 	});
+
+	// Make the window click-through by default so the desktop behind it is
+	// interactive. Mouse-move events are still forwarded so the renderer can
+	// dynamically enable interactivity when the cursor is over an interactive
+	// element (HUD bar, webcam preview, etc.).
+	win.setIgnoreMouseEvents(true, { forward: true });
+
+	// On Windows, exclude the transparent overlay from screen capture so that
+	// DXGI Desktop Duplication sees through it and captures the content behind.
+	// Without this, a full-screen transparent window prevents DXGI from
+	// generating dirty-rect notifications, which freezes the screen capture.
+	// WDA_EXCLUDEFROMCAPTURE (Win10 2004+) makes the window invisible to
+	// capture rather than showing a black rectangle.
+	if (process.platform === "win32") {
+		win.setContentProtection(true);
+	}
 
 	// Follow the user across macOS Spaces (virtual desktops).
 	// Without this the HUD stays pinned to the Space it was first opened on.

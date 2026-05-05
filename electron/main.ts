@@ -19,6 +19,7 @@ import {
 	createEditorWindow,
 	createHudOverlayWindow,
 	createSourceSelectorWindow,
+	getHudOverlayWindow,
 } from "./windows";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -28,6 +29,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // which doesn't work when running from a terminal/IDE during development, makes my life easier
 if (process.platform === "darwin") {
 	app.commandLine.appendSwitch("disable-features", "MacCatapLoopbackAudioForScreenShare");
+}
+
+// Fix GPU cache permission errors on Windows: multiple BrowserWindows share
+// the same GPU cache and collide with ACCESS_DENIED.  Redirect the disk cache
+// to a per-app directory that is always writable, and disable the GPU shader
+// cache entirely to avoid concurrent-write corruption.
+if (process.platform === "win32") {
+	const cacheDir = path.join(app.getPath("userData"), "cache");
+	app.commandLine.appendSwitch("disk-cache-dir", cacheDir);
+	app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+	app.commandLine.appendSwitch("ignore-gpu-blocklist");
 }
 
 // Enable Wayland support for proper screen capture and window management
@@ -437,6 +449,7 @@ app.whenReady().then(async () => {
 		() => mainWindow,
 		() => sourceSelectorWindow,
 		() => countdownOverlayWindow,
+		getHudOverlayWindow,
 		(recording: boolean, sourceName: string) => {
 			selectedSourceName = sourceName;
 			if (!tray) createTray();

@@ -6,7 +6,7 @@ export type { WebcamLayoutPreset };
 /** Webcam size as a percentage of the canvas reference dimension (10–50). */
 export type WebcamSizePreset = number;
 
-export const DEFAULT_WEBCAM_SIZE_PRESET: WebcamSizePreset = 25;
+export const DEFAULT_WEBCAM_SIZE_PRESET: WebcamSizePreset = 45;
 
 export const DEFAULT_WEBCAM_LAYOUT_PRESET: WebcamLayoutPreset = "picture-in-picture";
 

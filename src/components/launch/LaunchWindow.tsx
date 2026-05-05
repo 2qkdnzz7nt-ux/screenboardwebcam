@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Languages } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BsPauseCircle, BsPlayCircle, BsRecordCircle } from "react-icons/bs";
 import { FaRegStopCircle } from "react-icons/fa";
@@ -106,6 +106,7 @@ export function LaunchWindow() {
 		setWebcamEnabled,
 		webcamDeviceId,
 		setWebcamDeviceId,
+		webcamStream,
 	} = useScreenRecorder();
 
 	const showMicControls = microphoneEnabled && !recording;
@@ -118,6 +119,39 @@ export function LaunchWindow() {
 	const [isWebcamHovered, setIsWebcamHovered] = useState(false);
 	const [isWebcamFocused, setIsWebcamFocused] = useState(false);
 	const webcamExpanded = isWebcamHovered || isWebcamFocused;
+
+	// Webcam preview canvas and drag state
+	const [webcamPos, setWebcamPos] = useState({ x: -1, y: -1 }); // left/top in px; -1 = auto-init to bottom-right
+	const webcamDragRef = useRef({ dragging: false, offsetX: 0, offsetY: 0 });
+
+	// ── Click-through control via mousemove ─────────────────────────
+	// The HUD overlay window is click-through by default (setIgnoreMouseEvents).
+	// With { forward: true }, mouse-move events are still forwarded to the
+	// renderer. We use DOM hit-testing on each mousemove to detect whether
+	// the cursor is over an interactive element (marked with data-hud-interactive)
+	// and toggle setIgnoreMouseEvents accordingly. This avoids all DPI /
+	// coordinate-mismatch issues that plague the cursor-polling approach on
+	// Windows with non-100% display scaling.
+	const hudBarRef = useRef<HTMLDivElement | null>(null);
+	const webcamCanvasWrapperRef = useRef<HTMLCanvasElement | null>(null);
+	const devicePanelRef = useRef<HTMLDivElement | null>(null);
+
+	useEffect(() => {
+		const handleMouseMove = (e: MouseEvent) => {
+			const target = e.target as HTMLElement;
+			const isOverInteractive = target.closest("[data-hud-interactive]") !== null;
+			const isDragging = webcamDragRef.current.dragging;
+
+			if (isOverInteractive || isDragging) {
+				window.electronAPI?.setIgnoreMouseEvents(false);
+			} else {
+				window.electronAPI?.setIgnoreMouseEvents(true, { forward: true });
+			}
+		};
+
+		window.addEventListener("mousemove", handleMouseMove);
+		return () => window.removeEventListener("mousemove", handleMouseMove);
+	}, []);
 	const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
 	const languageTriggerRef = useRef<HTMLButtonElement | null>(null);
 	const languageMenuPanelRef = useRef<HTMLDivElement | null>(null);
@@ -172,6 +206,71 @@ export function LaunchWindow() {
 			setWebcamDeviceId(selectedCameraId);
 		}
 	}, [selectedCameraId, setWebcamDeviceId]);
+
+	// Update webcam preview when stream changes — draw to canvas for reliable circular clip
+	const webcamCanvasRef = useRef<HTMLCanvasElement | null>(null);
+	const webcamVideoRef2 = useRef<HTMLVideoElement | null>(null);
+	const webcamAnimRef = useRef<number>(0);
+
+	const drawWebcamFrame = useCallback(() => {
+		const video = webcamVideoRef2.current;
+		const canvas = webcamCanvasRef.current;
+		if (!video || !canvas) return;
+		const ctx = canvas.getContext("2d");
+		if (!ctx) return;
+
+		const size = canvas.width;
+		const radius = size / 2;
+
+		ctx.clearRect(0, 0, size, size);
+		ctx.save();
+		ctx.beginPath();
+		ctx.arc(radius, radius, radius, 0, Math.PI * 2);
+		ctx.clip();
+
+		// Cover-fit the video into the square canvas
+		const vw = video.videoWidth || 1;
+		const vh = video.videoHeight || 1;
+		const scale = Math.max(size / vw, size / vh);
+		const dw = vw * scale;
+		const dh = vh * scale;
+		ctx.drawImage(video, (size - dw) / 2, (size - dh) / 2, dw, dh);
+		ctx.restore();
+
+		webcamAnimRef.current = requestAnimationFrame(drawWebcamFrame);
+	}, []);
+
+	useEffect(() => {
+		if (!webcamStream) {
+			cancelAnimationFrame(webcamAnimRef.current);
+			const canvas = webcamCanvasRef.current;
+			if (canvas) {
+				canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+			}
+			return;
+		}
+
+		const video = document.createElement("video");
+		video.srcObject = webcamStream;
+		video.muted = true;
+		video.playsInline = true;
+		video.autoplay = true;
+		webcamVideoRef2.current = video;
+
+		const onCanPlay = () => {
+			cancelAnimationFrame(webcamAnimRef.current);
+			webcamAnimRef.current = requestAnimationFrame(drawWebcamFrame);
+		};
+		video.addEventListener("canplay", onCanPlay);
+		void video.play();
+
+		return () => {
+			video.removeEventListener("canplay", onCanPlay);
+			cancelAnimationFrame(webcamAnimRef.current);
+			video.srcObject = null;
+			webcamVideoRef2.current = null;
+		};
+	}, [webcamStream, drawWebcamFrame]);
 
 	useEffect(() => {
 		if (!import.meta.env.DEV) {
@@ -319,8 +418,58 @@ export function LaunchWindow() {
 		// viewport (notably on Windows), causing a horizontal scrollbar once the
 		// recording toolbar widened (issue #305).
 		<div
-			className={`h-full w-full min-w-0 max-w-full overflow-x-hidden overflow-y-hidden bg-transparent ${styles.electronDrag}`}
+			className={`h-full w-full min-w-0 max-w-full overflow-x-hidden overflow-y-hidden bg-transparent`}
 		>
+			{/* Webcam preview - circular, borderless, draggable via canvas */}
+			{webcamStream && (
+				<canvas
+					ref={(el) => {
+						webcamCanvasRef.current = el;
+						webcamCanvasWrapperRef.current = el;
+					}}
+					width={400}
+					height={400}
+					data-hud-interactive
+					className={`fixed cursor-grab active:cursor-grabbing ${styles.electronNoDrag}`}
+					style={{
+						zIndex: 50,
+						width: 200,
+						height: 200,
+						left: webcamPos.x < 0 ? undefined : webcamPos.x,
+						top: webcamPos.y < 0 ? undefined : webcamPos.y,
+						right: webcamPos.x < 0 ? 16 : undefined,
+						bottom: webcamPos.x < 0 ? 80 : undefined,
+					}}
+					onPointerDown={(e) => {
+						e.preventDefault();
+						const rect = e.currentTarget.getBoundingClientRect();
+						webcamDragRef.current = {
+							dragging: true,
+							offsetX: e.clientX - rect.left,
+							offsetY: e.clientY - rect.top,
+						};
+						// While dragging, keep window interactive
+						window.electronAPI?.setIgnoreMouseEvents(false);
+						(e.target as HTMLElement).setPointerCapture(e.pointerId);
+					}}
+					onPointerMove={(e) => {
+						if (!webcamDragRef.current.dragging) return;
+						const newX = Math.max(
+							0,
+							Math.min(window.innerWidth - 200, e.clientX - webcamDragRef.current.offsetX),
+						);
+						const newY = Math.max(
+							0,
+							Math.min(window.innerHeight - 200, e.clientY - webcamDragRef.current.offsetY),
+						);
+						setWebcamPos({ x: newX, y: newY });
+					}}
+					onPointerUp={() => {
+						webcamDragRef.current.dragging = false;
+					}}
+				/>
+			)}
+
 			{systemLocaleSuggestion && (
 				<div
 					className={`fixed top-8 left-1/2 z-30 w-[calc(100vw-1rem)] max-w-[520px] -translate-x-1/2 rounded-xl border border-white/15 bg-[rgba(20,20,28,0.95)] p-3 shadow-2xl backdrop-blur-xl text-white animate-in fade-in-0 zoom-in-95 duration-200 ${styles.electronNoDrag}`}
@@ -360,6 +509,8 @@ export function LaunchWindow() {
 			{/* Device selectors — fixed above HUD bar, viewport-relative, never clipped */}
 			{(showMicControls || showWebcamControls) && (
 				<div
+					ref={devicePanelRef}
+					data-hud-interactive
 					className={`fixed bottom-[60px] left-1/2 -translate-x-1/2 flex items-center gap-2 animate-mic-panel-in ${styles.electronNoDrag}`}
 				>
 					{/* Mic selector */}
@@ -485,6 +636,8 @@ export function LaunchWindow() {
 
 			{/* HUD bar — fixed at bottom center, viewport-relative, never moves */}
 			<div
+				ref={hudBarRef}
+				data-hud-interactive
 				className={`fixed bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2 py-1.5 rounded-full shadow-hud-bar bg-gradient-to-br from-[rgba(28,28,36,0.97)] to-[rgba(18,18,26,0.96)] backdrop-blur-[16px] backdrop-saturate-[140%] border border-[rgba(80,80,120,0.25)]`}
 			>
 				{/* Drag handle */}
