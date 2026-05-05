@@ -487,65 +487,20 @@ export function registerIpcHandlers(
 	onRecordingStateChange?: (recording: boolean, sourceName: string) => void,
 	switchToHud?: () => void,
 ) {
-	// ─── Interactive-region tracking for click-through ──────────────────
-	// The HUD overlay window covers the entire screen but should only
-	// capture mouse events when the cursor is over an interactive element
-	// (HUD bar, webcam preview, device selectors). On Windows the
-	// setIgnoreMouseEvents(true, { forward: true }) approach is unreliable,
-	// so we poll the cursor position in the main process and toggle
-	// setIgnoreMouseEvents based on whether the cursor is inside any of
-	// the interactive regions reported by the renderer.
-	type InteractiveRegion = { x: number; y: number; width: number; height: number };
-	let interactiveRegions: InteractiveRegion[] = [];
-	let cursorPollTimer: ReturnType<typeof setInterval> | null = null;
-	let lastIgnoreState = true; // start as click-through
+	// ─── Click-through control ──────────────────────────────────────────
+	// The renderer now controls setIgnoreMouseEvents directly via the
+	// "set-ignore-mouse-events" IPC channel, using DOM hit-testing on
+	// mousemove events. The old cursor-polling mechanism that required
+	// coordinate conversion has been removed because it breaks on Windows
+	// with non-100% display scaling (DPI mismatch between CSS pixels and
+	// screen pixels).
+	//
+	// The "update-interactive-regions" IPC is kept as a no-op for backward
+	// compatibility but is no longer used by the renderer.
 
-	const startCursorPoll = () => {
-		if (cursorPollTimer) return;
-		cursorPollTimer = setInterval(() => {
-			const hudWin = getHudOverlayWindow();
-			if (!hudWin || hudWin.isDestroyed() || !hudWin.isVisible()) return;
-
-			const cursor = screen.getCursorScreenPoint();
-			const inside = interactiveRegions.some(
-				(r) =>
-					cursor.x >= r.x &&
-					cursor.x <= r.x + r.width &&
-					cursor.y >= r.y &&
-					cursor.y <= r.y + r.height,
-			);
-
-			const shouldIgnore = !inside;
-			if (shouldIgnore !== lastIgnoreState) {
-				hudWin.setIgnoreMouseEvents(shouldIgnore, shouldIgnore ? { forward: true } : undefined);
-				lastIgnoreState = shouldIgnore;
-			}
-		}, 30);
-	};
-
-	const stopCursorPoll = () => {
-		if (cursorPollTimer) {
-			clearInterval(cursorPollTimer);
-			cursorPollTimer = null;
-		}
-	};
-
-	// Receive interactive-region updates from the renderer.
-	// Each update replaces the previous set of regions entirely.
-	ipcMain.on("update-interactive-regions", (_, regions: InteractiveRegion[]) => {
-		interactiveRegions = regions;
-		// Start polling as soon as we know there are regions to check.
-		if (regions.length > 0) {
-			startCursorPoll();
-		} else {
-			// No interactive regions → ensure the window is click-through.
-			const hudWin = getHudOverlayWindow();
-			if (hudWin && !hudWin.isDestroyed()) {
-				hudWin.setIgnoreMouseEvents(true, { forward: true });
-				lastIgnoreState = true;
-			}
-			stopCursorPoll();
-		}
+	ipcMain.on("update-interactive-regions", () => {
+		// No-op: click-through is now controlled by the renderer via
+		// set-ignore-mouse-events IPC using DOM hit-testing on mousemove.
 	});
 
 	const supportsWindowOpacity = process.platform !== "linux";
@@ -1370,15 +1325,12 @@ export function registerIpcHandlers(
 		}
 	});
 
-	ipcMain.on(
-		"set-ignore-mouse-events",
-		(event, ignore: boolean, options?: { forward: boolean }) => {
-			const win = BrowserWindow.fromWebContents(event.sender);
-			if (win && !win.isDestroyed()) {
-				win.setIgnoreMouseEvents(ignore, options);
-			}
-		},
-	);
+	ipcMain.on("set-ignore-mouse-events", (event, ignore: boolean, options?: { forward: boolean }) => {
+		const win = BrowserWindow.fromWebContents(event.sender);
+		if (win && !win.isDestroyed()) {
+			win.setIgnoreMouseEvents(ignore, options);
+		}
+	});
 
 	ipcMain.handle("save-shortcuts", async (_, shortcuts: unknown) => {
 		try {

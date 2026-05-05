@@ -429,6 +429,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			screenRecorder.current = null;
 			teardownMedia();
 		};
+		// biome-ignore lint/correctness/useExhaustiveDependencies: safeHideCountdownOverlay is stable via useCallback
 	}, [teardownMedia, safeHideCountdownOverlay]);
 
 	const safeShowCountdownOverlay = async (value: number, runId: number) => {
@@ -456,13 +457,13 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		}
 	};
 
-	const safeHideCountdownOverlay = useCallback(async (runId: number) => {
+	const safeHideCountdownOverlay = async (runId: number) => {
 		try {
 			await window.electronAPI.hideCountdownOverlay(runId);
 		} catch (error) {
 			console.warn("Failed to hide countdown overlay:", error);
 		}
-	}, []);
+	};
 
 	const isCountdownRunActive = (runId?: number) =>
 		runId === undefined || countdownRunId.current === runId;

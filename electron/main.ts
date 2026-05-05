@@ -18,8 +18,8 @@ import {
 	createCountdownOverlayWindow,
 	createEditorWindow,
 	createHudOverlayWindow,
-	createSourceSelectorWindow,
 	getHudOverlayWindow,
+	createSourceSelectorWindow,
 } from "./windows";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

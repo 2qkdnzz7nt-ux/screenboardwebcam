@@ -143,9 +143,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => {
 		ipcRenderer.send("set-ignore-mouse-events", ignore, options);
 	},
-	updateInteractiveRegions: (
-		regions: { x: number; y: number; width: number; height: number }[],
-	) => {
+	updateInteractiveRegions: (regions: { left: number; top: number; width: number; height: number }[]) => {
 		ipcRenderer.send("update-interactive-regions", regions);
 	},
 	showCountdownOverlay: (value: number, runId: number) => {

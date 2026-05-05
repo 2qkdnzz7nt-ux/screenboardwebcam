@@ -125,88 +125,34 @@ export function LaunchWindow() {
 	const [webcamPos, setWebcamPos] = useState({ x: -1, y: -1 }); // left/top in px; -1 = auto-init to bottom-right
 	const webcamDragRef = useRef({ dragging: false, offsetX: 0, offsetY: 0 });
 
-	// ── Interactive-region tracking for click-through ─────────────────
-	// On Windows setIgnoreMouseEvents(true, { forward: true }) does not
-	// reliably forward mouse-move events, so the renderer cannot detect
-	// when the cursor is over an interactive element. Instead we report
-	// the bounding rectangles of interactive elements to the main process,
-	// which polls the cursor position and toggles setIgnoreMouseEvents.
+	// ── Click-through control via mousemove ─────────────────────────
+	// The HUD overlay window is click-through by default (setIgnoreMouseEvents).
+	// With { forward: true }, mouse-move events are still forwarded to the
+	// renderer. We use DOM hit-testing on each mousemove to detect whether
+	// the cursor is over an interactive element (marked with data-hud-interactive)
+	// and toggle setIgnoreMouseEvents accordingly. This avoids all DPI /
+	// coordinate-mismatch issues that plague the cursor-polling approach on
+	// Windows with non-100% display scaling.
 	const hudBarRef = useRef<HTMLDivElement | null>(null);
 	const webcamCanvasWrapperRef = useRef<HTMLCanvasElement | null>(null);
 	const devicePanelRef = useRef<HTMLDivElement | null>(null);
 
-	// Helper: convert a DOMRect (viewport-relative) to screen coordinates.
-	const rectToScreen = useCallback(
-		(rect: DOMRect): { x: number; y: number; width: number; height: number } | null => {
-			// When running in a browser (dev / storybook) there is no screen
-			// coordinate system – skip.
-			if (typeof window.screenX !== "number") return null;
-			return {
-				x: Math.round(window.screenX + rect.left),
-				y: Math.round(window.screenY + rect.top),
-				width: Math.round(rect.width),
-				height: Math.round(rect.height),
-			};
-		},
-		[],
-	);
-
-	// Collect the current interactive regions and send them to the main process.
-	const syncInteractiveRegions = useCallback(() => {
-		const regions: { x: number; y: number; width: number; height: number }[] = [];
-
-		// HUD bar
-		if (hudBarRef.current) {
-			const r = rectToScreen(hudBarRef.current.getBoundingClientRect());
-			if (r) regions.push(r);
-		}
-
-		// Webcam preview
-		if (webcamCanvasWrapperRef.current) {
-			const r = rectToScreen(webcamCanvasWrapperRef.current.getBoundingClientRect());
-			if (r) regions.push(r);
-		}
-
-		// Device selectors panel
-		if (devicePanelRef.current) {
-			const r = rectToScreen(devicePanelRef.current.getBoundingClientRect());
-			if (r) regions.push(r);
-		}
-
-		window.electronAPI?.updateInteractiveRegions(regions);
-	}, [rectToScreen]);
-
-	// Send region updates whenever the layout may change.
 	useEffect(() => {
-		syncInteractiveRegions();
+		const handleMouseMove = (e: MouseEvent) => {
+			const target = e.target as HTMLElement;
+			const isOverInteractive = target.closest("[data-hud-interactive]") !== null;
+			const isDragging = webcamDragRef.current.dragging;
 
-		// Also update on resize / scroll and at a regular interval (the webcam
-		// preview is draggable so its position can change at any time).
-		const onLayoutChange = () => syncInteractiveRegions();
-		window.addEventListener("resize", onLayoutChange);
-		window.addEventListener("scroll", onLayoutChange, true);
-
-		const intervalId = setInterval(syncInteractiveRegions, 200);
-
-		return () => {
-			window.removeEventListener("resize", onLayoutChange);
-			window.removeEventListener("scroll", onLayoutChange, true);
-			clearInterval(intervalId);
+			if (isOverInteractive || isDragging) {
+				window.electronAPI?.setIgnoreMouseEvents(false);
+			} else {
+				window.electronAPI?.setIgnoreMouseEvents(true, { forward: true });
+			}
 		};
-	}, [syncInteractiveRegions]);
 
-	// Re-sync when specific state that affects layout changes.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: all listed values affect interactive region positions
-	useEffect(() => {
-		syncInteractiveRegions();
-	}, [
-		webcamPos,
-		recording,
-		microphoneEnabled,
-		webcamEnabled,
-		webcamStream,
-		syncInteractiveRegions,
-	]);
+		window.addEventListener("mousemove", handleMouseMove);
+		return () => window.removeEventListener("mousemove", handleMouseMove);
+	}, []);
 	const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
 	const languageTriggerRef = useRef<HTMLButtonElement | null>(null);
 	const languageMenuPanelRef = useRef<HTMLDivElement | null>(null);
@@ -494,14 +440,14 @@ export function LaunchWindow() {
 						webcamCanvasRef.current = el;
 						webcamCanvasWrapperRef.current = el;
 					}}
-					width={224}
-					height={224}
+					width={400}
+					height={400}
 					data-hud-interactive
 					className={`fixed cursor-grab active:cursor-grabbing ${styles.electronNoDrag}`}
 					style={{
 						zIndex: 50,
-						width: 112,
-						height: 112,
+						width: 200,
+						height: 200,
 						left: webcamPos.x < 0 ? undefined : webcamPos.x,
 						top: webcamPos.y < 0 ? undefined : webcamPos.y,
 						right: webcamPos.x < 0 ? 16 : undefined,
@@ -515,33 +461,18 @@ export function LaunchWindow() {
 							offsetX: e.clientX - rect.left,
 							offsetY: e.clientY - rect.top,
 						};
-						// While dragging, send a full-screen region so the window
-						// stays interactive even when the cursor leaves the canvas.
-						window.electronAPI?.updateInteractiveRegions([
-							{
-								x: Math.round(window.screenX),
-								y: Math.round(window.screenY),
-								width: window.innerWidth,
-								height: window.innerHeight,
-							},
-						]);
+						// While dragging, keep window interactive
+						window.electronAPI?.setIgnoreMouseEvents(false);
 						(e.target as HTMLElement).setPointerCapture(e.pointerId);
 					}}
 					onPointerMove={(e) => {
 						if (!webcamDragRef.current.dragging) return;
-						const newX = Math.max(
-							0,
-							Math.min(window.innerWidth - 112, e.clientX - webcamDragRef.current.offsetX),
-						);
-						const newY = Math.max(
-							0,
-							Math.min(window.innerHeight - 112, e.clientY - webcamDragRef.current.offsetY),
-						);
+						const newX = Math.max(0, Math.min(window.innerWidth - 200, e.clientX - webcamDragRef.current.offsetX));
+						const newY = Math.max(0, Math.min(window.innerHeight - 200, e.clientY - webcamDragRef.current.offsetY));
 						setWebcamPos({ x: newX, y: newY });
 					}}
 					onPointerUp={() => {
 						webcamDragRef.current.dragging = false;
-						syncInteractiveRegions();
 					}}
 				/>
 			)}
